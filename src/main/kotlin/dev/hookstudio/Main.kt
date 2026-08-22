@@ -37,6 +37,10 @@ import javax.swing.JTextField
 import javax.swing.SwingUtilities
 import javax.swing.border.EmptyBorder
 import java.io.InputStream
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 
 private data class CommandResult(val exitCode: Int, val output: String)
 private data class AppNames(val english: String = "", val chinese: String = "") {
@@ -317,8 +321,9 @@ private class HookStudioFrame : JFrame("HookStudio") {
         button(actions, "导出 AI 分析文件") { exportAiWorkspace() }
         button(actions, "生成模块") { generateModule() }
         button(actions, "查看 Logcat") { readLogcat() }
+        button(actions, "检查更新") { checkForUpdatesAsync(showUpToDate = true) }
 
-        val title = JLabel("HookStudio")
+        val title = JLabel("HookStudio ${currentVersion()}")
         title.foreground = GlassTheme.ink
         title.font = title.font.deriveFont(java.awt.Font.BOLD, 27f)
         val subtitle = JLabel("Android APK 分析与 LSPosed Hook 工作台")
@@ -364,6 +369,61 @@ private class HookStudioFrame : JFrame("HookStudio") {
         content.add(bottom, BorderLayout.CENTER)
         contentPane = LiquidGlassRootPanel()
         contentPane.add(content, BorderLayout.CENTER)
+        checkForUpdatesAsync(showUpToDate = false)
+    }
+
+    private fun currentVersion(): String = javaClass.getResourceAsStream("/version.txt")
+        ?.bufferedReader()?.use { it.readText().trim() }
+        ?.ifBlank { "1.0.0" }
+        ?: "1.0.0"
+
+    private fun checkForUpdatesAsync(showUpToDate: Boolean) {
+        Thread {
+            runCatching {
+                val current = currentVersion()
+                val request = HttpRequest.newBuilder(URI.create("https://raw.githubusercontent.com/RobustLuo/HookStudio/main/VERSION"))
+                    .timeout(java.time.Duration.ofSeconds(5))
+                    .header("User-Agent", "HookStudio/$current")
+                    .GET()
+                    .build()
+                val response = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build()
+                    .send(request, HttpResponse.BodyHandlers.ofString())
+                if (response.statusCode() !in 200..299) return@runCatching
+                val latest = response.body().trim()
+                if (!isNewerVersion(latest, current)) {
+                    if (showUpToDate) SwingUtilities.invokeLater {
+                        JOptionPane.showMessageDialog(this, "当前已是最新版本 $current。", "检查更新", JOptionPane.INFORMATION_MESSAGE)
+                    }
+                    return@runCatching
+                }
+                SwingUtilities.invokeLater {
+                    val choice = JOptionPane.showConfirmDialog(
+                        this,
+                        "发现新版本 $latest（当前版本 $current）。\n是否打开 GitHub 更新页面？",
+                        "HookStudio 有可用更新",
+                        JOptionPane.YES_NO_OPTION,
+                        JOptionPane.INFORMATION_MESSAGE
+                    )
+                    if (choice == JOptionPane.YES_OPTION) openExternalUrl("https://github.com/RobustLuo/HookStudio/releases")
+                }
+            }.onFailure { error ->
+                if (showUpToDate) SwingUtilities.invokeLater {
+                    JOptionPane.showMessageDialog(this, "检查更新失败：${error.message.orEmpty()}", "检查更新", JOptionPane.WARNING_MESSAGE)
+                }
+            }
+        }.apply { isDaemon = true; name = "hookstudio-update-check" }.start()
+    }
+
+    private fun isNewerVersion(remote: String, local: String): Boolean {
+        fun parts(value: String) = value.trim().removePrefix("v").split(".").map { it.toIntOrNull() ?: 0 }
+        val a = parts(remote)
+        val b = parts(local)
+        for (index in 0 until maxOf(a.size, b.size)) {
+            val left = a.getOrElse(index) { 0 }
+            val right = b.getOrElse(index) { 0 }
+            if (left != right) return left > right
+        }
+        return false
     }
 
     private fun loadWindowIcon(): BufferedImage? = runCatching {
@@ -692,6 +752,15 @@ private class HookStudioFrame : JFrame("HookStudio") {
             isWindows() -> listOf("explorer.exe", path.toString())
             System.getProperty("os.name").contains("Mac", ignoreCase = true) -> listOf("open", path.toString())
             else -> listOf("xdg-open", path.toString())
+        }
+        Shell.run(*command.toTypedArray())
+    }
+
+    private fun openExternalUrl(url: String) {
+        val command = when {
+            isWindows() -> listOf("rundll32.exe", "url.dll,FileProtocolHandler", url)
+            System.getProperty("os.name").contains("Mac", ignoreCase = true) -> listOf("open", url)
+            else -> listOf("xdg-open", url)
         }
         Shell.run(*command.toTypedArray())
     }

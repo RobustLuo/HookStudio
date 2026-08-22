@@ -61,12 +61,15 @@ gradle run
 ./dev-run.command
 ```
 
-生成 macOS 应用包：
+生成并安装 macOS 应用：
 
 ```bash
 ./package-macos.command
-open build/macos/HookStudio.app
 ```
+
+脚本会把应用安装到 `~/Applications/HookStudio.app`，并在桌面创建 `HookStudio.app` 快捷方式。以后直接双击桌面图标或在“应用程序”中启动，不需要终端命令。
+
+软件启动时会后台检查 GitHub 版本；也可以点击界面中的“检查更新”。发现新版本后会提示并打开更新页面。
 
 ### Windows
 

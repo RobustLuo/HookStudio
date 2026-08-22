@@ -2,6 +2,7 @@
 setlocal
 
 cd /d "%~dp0"
+set /p APP_VERSION=<VERSION
 
 echo Building HookStudio...
 call gradle --quiet installDist
@@ -16,7 +17,7 @@ if exist "build\windows\HookStudio" rmdir /s /q "build\windows\HookStudio"
 jpackage ^
   --type app-image ^
   --name HookStudio ^
-  --app-version 1.0.0 ^
+  --app-version %APP_VERSION% ^
   --vendor HookStudio ^
   --input "build\install\HookStudio\lib" ^
   --main-jar HookStudio-0.1.0.jar ^
