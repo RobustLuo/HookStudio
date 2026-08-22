@@ -45,7 +45,7 @@ JADX 反编译
 
 - JDK 17 或更高版本
 - Gradle 9.7.1 或更高版本
-- Android Platform Tools（提供 `adb`）
+- Android Platform Tools（提供 `adb`；从桌面启动时会自动搜索常见 SDK 和 Homebrew 安装路径）
 - JADX，并将 `jadx` 或 `jadx.bat` 加入 `PATH`
 - Android 手机已开启 USB 调试，并允许当前电脑调试
 

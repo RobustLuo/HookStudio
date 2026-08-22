@@ -16,6 +16,7 @@ import java.awt.RenderingHints
 import java.awt.geom.RoundRectangle2D
 import java.awt.image.BufferedImage
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -56,13 +57,74 @@ private data class AppChoice(val label: String, val packageName: String) {
 
 private fun isWindows(): Boolean = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
 
-private fun normalizeTool(command: String): String {
-    if (!isWindows() || command.contains(File.separator) || command.contains('/')) return command
-    return when (command) {
-        "adb" -> "adb.exe"
-        "jadx" -> "jadx.bat"
-        else -> command
+private fun isExecutableFile(path: Path): Boolean = Files.isRegularFile(path) &&
+    (Files.isExecutable(path) || path.fileName.toString().endsWith(".bat", ignoreCase = true) ||
+        path.fileName.toString().endsWith(".cmd", ignoreCase = true) || isWindows())
+
+private fun findTool(command: String): String? {
+    val commandNames = if (isWindows()) {
+        listOf("$command.exe", "$command.bat", "$command.cmd", command)
+    } else {
+        listOf(command)
     }
+    val pathEntries = System.getenv("PATH")?.split(File.pathSeparator).orEmpty()
+    val candidates = mutableListOf<Path>()
+    pathEntries.forEach { directory ->
+        commandNames.forEach { name -> candidates.add(Path.of(directory, name)) }
+    }
+
+    val home = Path.of(System.getProperty("user.home"))
+    val sdkRoots = listOfNotNull(
+        System.getenv("ANDROID_HOME"),
+        System.getenv("ANDROID_SDK_ROOT")
+    ).map(Path::of).toMutableList()
+    if (isWindows()) {
+        System.getenv("LOCALAPPDATA")?.let { sdkRoots.add(Path.of(it, "Android", "Sdk")) }
+        System.getenv("USERPROFILE")?.let { sdkRoots.add(Path.of(it, "AppData", "Local", "Android", "Sdk")) }
+    } else {
+        sdkRoots.add(home.resolve("Library/Android/sdk"))
+        sdkRoots.add(home.resolve("Android/Sdk"))
+    }
+    sdkRoots.distinct().forEach { sdk ->
+        if (command.equals("adb", ignoreCase = true)) {
+            commandNames.forEach { name -> candidates.add(sdk.resolve("platform-tools").resolve(name)) }
+        }
+        if (command.equals("aapt", ignoreCase = true)) {
+            val buildTools = sdk.resolve("build-tools")
+            if (Files.isDirectory(buildTools)) {
+                Files.list(buildTools).use { dirs ->
+                    dirs.filter { Files.isDirectory(it) }
+                        .sorted(Comparator.reverseOrder())
+                        .forEach { dir -> commandNames.forEach { name -> candidates.add(dir.resolve(name)) } }
+                }
+            }
+        }
+    }
+    if (command.equals("adb", ignoreCase = true)) {
+        listOf("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin").forEach { directory ->
+            commandNames.forEach { name -> candidates.add(Path.of(directory, name)) }
+        }
+    }
+    if (command.equals("jadx", ignoreCase = true)) {
+        listOf(
+            home.resolve("jadx/bin"),
+            home.resolve("Downloads/jadx/bin"),
+            home.resolve("Applications/jadx/bin"),
+            Path.of("/opt/homebrew/bin"),
+            Path.of("/usr/local/bin")
+        ).forEach { directory -> commandNames.forEach { name -> candidates.add(directory.resolve(name)) } }
+    }
+    return candidates.firstOrNull(::isExecutableFile)?.toString()
+}
+
+private fun normalizeTool(command: String): String {
+    if (command.contains(File.separator) || command.contains('/')) return command
+    if (command.equals("adb", ignoreCase = true) || command.equals("jadx", ignoreCase = true)) {
+        return findTool(command) ?: if (isWindows()) {
+            if (command.equals("adb", ignoreCase = true)) "adb.exe" else "jadx.bat"
+        } else command
+    }
+    return command
 }
 
 private object GlassTheme {
@@ -176,12 +238,24 @@ private object Shell {
         }
         val processArgs = if (isWindows() && normalizedArgs.firstOrNull() == "jadx.bat") {
             listOf("cmd.exe", "/c") + normalizedArgs
+        } else if (isWindows() && normalizedArgs.firstOrNull()?.endsWith(".bat", ignoreCase = true) == true) {
+            listOf("cmd.exe", "/c") + normalizedArgs
         } else {
             normalizedArgs
         }
-        val process = ProcessBuilder(*processArgs.toTypedArray())
-            .redirectErrorStream(true)
-            .start()
+        val process = try {
+            ProcessBuilder(*processArgs.toTypedArray())
+                .redirectErrorStream(true)
+                .start()
+        } catch (error: IOException) {
+            val tool = args.firstOrNull().orEmpty()
+            val hint = when {
+                tool.equals("adb", ignoreCase = true) -> "请安装 Android Platform Tools，或将 adb 所在目录加入 PATH"
+                tool.equals("jadx", ignoreCase = true) -> "请安装 JADX，或将 jadx 所在目录加入 PATH"
+                else -> "请检查程序是否已安装并加入 PATH"
+            }
+            return CommandResult(127, "无法启动 $tool：$hint（${error.message.orEmpty()}）")
+        }
         val output = StringBuilder()
         val reader = Thread {
             process.inputStream.bufferedReader().useLines { lines ->
@@ -470,14 +544,16 @@ private class HookStudioFrame : JFrame("HookStudio") {
     private fun Char.isChinese(): Boolean = this.code in 0x3400..0x9FFF
 
     private fun findAndroidTool(name: String): String? {
+        findTool(name)?.let { return it }
         val pathTool = System.getenv("PATH")?.split(java.io.File.pathSeparator)
             ?.asSequence()
             ?.map { Path.of(it, name) }
             ?.firstOrNull { Files.isExecutable(it) }
         if (pathTool != null) return pathTool.toString()
-        val sdkRoots = listOfNotNull(System.getenv("ANDROID_HOME"), System.getenv("ANDROID_SDK_ROOT"))
-            .distinct()
-            .map { Path.of(it) }
+        val home = Path.of(System.getProperty("user.home"))
+        val sdkRoots = (listOfNotNull(System.getenv("ANDROID_HOME"), System.getenv("ANDROID_SDK_ROOT")) +
+            listOf(home.resolve("Library/Android/sdk").toString(), home.resolve("Android/Sdk").toString()))
+            .distinct().map { Path.of(it) }
         for (sdk in sdkRoots) {
             val candidates = mutableListOf<Path>()
             if (name == "apkanalyzer") candidates.add(sdk.resolve("cmdline-tools/latest/bin/apkanalyzer"))
