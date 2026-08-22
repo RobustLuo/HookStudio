@@ -1,0 +1,9 @@
+.gradle/
+.kotlin/
+build/
+out/
+.DS_Store
+*.iml
+.idea/
+HookStudioProjects/
+*.log
