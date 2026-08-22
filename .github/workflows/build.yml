@@ -1,0 +1,44 @@
+name: Build HookStudio
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.7.1'
+
+      - name: Build
+        run: gradle clean build
+
+      - name: Package Windows app
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: package-windows.bat
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: HookStudio-${{ runner.os }}
+          path: |
+            build/libs/*.jar
+            build/windows/**
