@@ -38,6 +38,18 @@ import javax.swing.border.EmptyBorder
 import java.io.InputStream
 
 private data class CommandResult(val exitCode: Int, val output: String)
+private data class AppNames(val english: String = "", val chinese: String = "") {
+    fun bestLabel(packageName: String): String = listOf(english, chinese)
+        .firstOrNull { it.isNotBlank() }
+        ?: packageName
+
+    fun displayLabel(packageName: String): String = listOf(english, chinese)
+        .filter { it.isNotBlank() }
+        .distinct()
+        .ifEmpty { listOf(packageName) }
+        .joinToString(" / ")
+}
+
 private data class AppChoice(val label: String, val packageName: String) {
     override fun toString(): String = "$label（$packageName）"
 }
@@ -198,6 +210,7 @@ private class HookStudioFrame : JFrame("HookStudio") {
     private val methodField = GlassTextField(28).apply { text = "targetMethod" }
     private val output = JTextArea()
     private val appLabelCache = mutableMapOf<String, String>()
+    private val appNamesCache = mutableMapOf<String, AppNames>()
     private var lastApk: Path? = null
 
     init {
@@ -406,10 +419,16 @@ private class HookStudioFrame : JFrame("HookStudio") {
                 if (index == 0 || (index + 1) % 10 == 0 || index == packages.lastIndex) {
                     log("正在读取 App 名称：${index + 1}/${packages.size}")
                 }
-                val label = appLabelCache[pkg] ?: readAppLabel(pkg, tempDir, index).also {
-                    appLabelCache[pkg] = it
+                val cachedLabel = appLabelCache[pkg]
+                if (cachedLabel != null) {
+                    AppChoice(cachedLabel, pkg)
+                } else {
+                    val names = readAppNames(pkg, tempDir, index).also {
+                        appNamesCache[pkg] = it
+                        appLabelCache[pkg] = it.bestLabel(pkg)
+                    }
+                    AppChoice(names.displayLabel(pkg), pkg)
                 }
-                AppChoice(label.ifBlank { pkg }, pkg)
             }.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.label })
         } finally {
             Files.list(tempDir).use { files -> files.forEach { Files.deleteIfExists(it) } }
@@ -417,21 +436,38 @@ private class HookStudioFrame : JFrame("HookStudio") {
         }
     }
 
-    private fun readAppLabel(pkg: String, tempDir: Path, index: Int): String {
+    private fun readAppNames(pkg: String, tempDir: Path, index: Int): AppNames {
         val remoteApk = Shell.run("adb", "shell", "pm", "path", pkg, timeoutSeconds = 20).output
             .lineSequence()
             .firstOrNull { it.startsWith("package:") }
             ?.removePrefix("package:")
             ?.trim()
-            ?: return pkg
+            ?: return AppNames()
         val localApk = tempDir.resolve("app-$index.apk")
         val pulled = Shell.run("adb", "pull", remoteApk, localApk.toString(), timeoutSeconds = 90)
-        if (pulled.exitCode != 0 || !Files.isRegularFile(localApk)) return pkg
-        val aapt = findAndroidTool("aapt") ?: return pkg
-        val badging = Shell.run(aapt, "dump", "badging", localApk.toString(), timeoutSeconds = 30)
-        return Regex("application-label:'([^']*)'").find(badging.output)?.groupValues?.get(1)?.trim()
-            .orEmpty()
+        if (pulled.exitCode != 0 || !Files.isRegularFile(localApk)) return AppNames()
+        return readAppNamesFromApk(localApk)
     }
+
+    private fun readAppNamesFromApk(apk: Path): AppNames {
+        val aapt = findAndroidTool("aapt") ?: return AppNames()
+        val badging = Shell.run(aapt, "dump", "badging", apk.toString(), timeoutSeconds = 30)
+        val labels = badging.output.lineSequence().mapNotNull { line ->
+            Regex("application-label(?:-([^:]+))?:'([^']*)'").find(line)?.let { match ->
+                match.groupValues[1].lowercase() to match.groupValues[2].trim()
+            }
+        }.filter { it.second.isNotBlank() }.toMap()
+        val default = labels[""].orEmpty()
+        val english = labels.entries.firstOrNull { it.key.startsWith("en") }?.value
+            ?: default.takeIf { value -> value.any(Char::isLetter) && value.none { it.isChinese() } }
+            ?: ""
+        val chinese = labels.entries.firstOrNull { it.key.startsWith("zh") }?.value
+            ?: default.takeIf { value -> value.any { it.isChinese() } }
+            ?: ""
+        return AppNames(english = english, chinese = chinese)
+    }
+
+    private fun Char.isChinese(): Boolean = this.code in 0x3400..0x9FFF
 
     private fun findAndroidTool(name: String): String? {
         val pathTool = System.getenv("PATH")?.split(java.io.File.pathSeparator)
@@ -519,8 +555,16 @@ private class HookStudioFrame : JFrame("HookStudio") {
             decompile()
         }
 
+        val appNames = appNamesCache[pkg]
+            ?: readAppNamesFromApk(apk).also { appNamesCache[pkg] = it }
         val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
-        val exportRoot = Path.of(System.getProperty("user.home"), "Desktop", "HookStudio-AI", "$pkg-$timestamp")
+        val nameParts = listOf(appNames.english, appNames.chinese)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .map(::safeFileNamePart)
+            .filter { it.isNotBlank() }
+        val exportName = (nameParts.ifEmpty { listOf(pkg) } + timestamp).joinToString("-")
+        val exportRoot = Path.of(System.getProperty("user.home"), "Desktop", "HookStudio-AI", exportName)
         Files.createDirectories(exportRoot)
         copyTree(sourceDir, exportRoot.resolve("sources"))
         copyTree(decompiled.resolve("resources"), exportRoot.resolve("resources"))
@@ -531,6 +575,8 @@ private class HookStudioFrame : JFrame("HookStudio") {
         Files.writeString(exportRoot.resolve("file-index.txt"), buildFileIndex(exportRoot))
         Files.writeString(exportRoot.resolve("analysis-info.json"), """
             {
+              "englishName": "${jsonEscape(appNames.english)}",
+              "chineseName": "${jsonEscape(appNames.chinese)}",
               "package": "${jsonEscape(pkg)}",
               "generatedAt": "${jsonEscape(timestamp)}",
               "sourceFileCount": $sourceCount,
@@ -541,6 +587,8 @@ private class HookStudioFrame : JFrame("HookStudio") {
         Files.writeString(exportRoot.resolve("AI_PROMPT.md"), """
             # APK Hook 分析任务
 
+            英文名称：`${appNames.english.ifBlank { "未读取到" }}`
+            中文名称：`${appNames.chinese.ifBlank { "未读取到" }}`
             目标包名：`$pkg`
 
             请基于 `sources/`、`resources/` 和 `file-index.txt` 分析这个 Android APK：
@@ -556,6 +604,12 @@ private class HookStudioFrame : JFrame("HookStudio") {
         log("AI 分析文件已导出：$exportRoot")
         log("源码 $sourceCount 个，资源 $resourceCount 个")
     }
+
+    private fun safeFileNamePart(value: String): String = value
+        .replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]+"), "-")
+        .replace(Regex("\\s+"), " ")
+        .trim(' ', '.', '-')
+        .take(60)
 
     private fun openPath(path: Path) {
         val command = when {
